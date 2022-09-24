@@ -15,22 +15,34 @@ schem = mcschematic.MCSchematic()
 circuit_from_verilog = cg.from_file(f"./verilog/{input_verilog}.v")
 
 
-def recursive_process(circuit: circuitgraph.Circuit, depth_nodes: list, nodes: [str], depth: int):
+class Node:
+    def __init__(self, typ: str, name: str, data: list[list[tuple[str, int | tuple[int, int, int]]]],
+                 output: set[str]):
+        self.typ = typ
+        self.name = name
+        self.data = data
+        self.output = output
+
+    def to_tuple(self):
+        return self.typ, self.name, self.data, self.output
+
+
+def recursive_process(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node]], nodes: [str], depth: int):
     if depth >= len(depth_nodes):
         depth_nodes += [[], []]
 
     for node in nodes:
-        if node not in map(lambda x: x[1], depth_nodes[depth]):
-            if circuit.is_output(node):
-                depth_nodes[depth] = [(circuit.type(node), node, [])] + depth_nodes[depth]
-            else:
-                depth_nodes[depth] += [(circuit.type(node), node, [])]
+        if node not in map(lambda x: x.name, depth_nodes[depth]):
             fan = circuit.fanout(node)
+            if circuit.is_output(node):
+                depth_nodes[depth] = [Node(circuit.type(node), node, [], fan)] + depth_nodes[depth]
+            else:
+                depth_nodes[depth] += [Node(circuit.type(node), node, [], fan)]
             if len(fan) > 0:
                 recursive_process(circuit, depth_nodes, fan, depth + 2)
 
 
-def output_generation(circuit: circuitgraph.Circuit, depth_nodes: list):
+def output_generation(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node]]):
     for depth in range(int(len(depth_nodes) / 2)):
         index = depth * 2 + 1
 
@@ -38,22 +50,22 @@ def output_generation(circuit: circuitgraph.Circuit, depth_nodes: list):
         after_len = len(depth_nodes[index + 1]) if index + 1 < len(depth_nodes) else 0
         depth_nodes[index] = []
         for i in range(max(before_len, after_len)):
-            depth_nodes[index] += [("wire", "", [])]
+            depth_nodes[index] += [Node("wire", "", [], [])]
 
         for i, node in enumerate(depth_nodes[index - 1]):
-            typ, name, data = node
+            typ, name, data, output = node.to_tuple()
 
             if typ == "wire":
                 continue
             if circuit.is_output(name):
-                depth_nodes[index][i] = ("output", "", [])
+                depth_nodes[index][i] = Node("output", "", [], [])
                 if after_len >= before_len:
-                    depth_nodes[index] += [("wire", "", [])]
+                    depth_nodes[index] += [Node("wire", "", [], [])]
                 shift_right(depth_nodes, index + 1)
 
 
 # generate redstone wires
-def wire_generation(circuit: circuitgraph.Circuit, depth_nodes: list):
+def wire_generation(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node]]):
     node_input_amount = {}
     for depth in range(int(len(depth_nodes) / 2)):
         index = depth * 2
@@ -62,13 +74,12 @@ def wire_generation(circuit: circuitgraph.Circuit, depth_nodes: list):
         if len(depth_nodes) <= index + 2:
             continue
 
-        next_nodes = list(map(lambda x: x[1], depth_nodes[index + 2]))
+        next_nodes = list(map(lambda x: x.name, depth_nodes[index + 2]))
         for i, node in enumerate(depth_nodes[index]):
-            typ, name, data = node
+            typ, name, data, output = node.to_tuple()
             wire_node = depth_nodes[index + 1][i]
 
-            fanout = circuit.fanout(name)
-            for next_node in fanout:
+            for next_node in output:
                 if next_node not in node_input_amount:
                     node_input_amount[next_node] = 0
                 if node_input_amount[next_node] >= 2:
@@ -78,13 +89,13 @@ def wire_generation(circuit: circuitgraph.Circuit, depth_nodes: list):
                 single_wire_generation(wire_node, next_index, "right" if node_input_amount[next_node] == 1 else "left",
                                        input_amount, i)
                 node_input_amount[next_node] += 1
-            if len(fanout) > 0:
+            if len(output) > 0:
                 input_amount += 1
 
 
-def single_wire_generation(node: tuple[str, str, list], next_index: int,
+def single_wire_generation(node: Node, next_index: int,
                            output_slot: str, input_amount: int, index: int):
-    typ, name, data = node
+    typ, name, data, output = node.to_tuple()
 
     path = []
 
@@ -105,9 +116,9 @@ def single_wire_generation(node: tuple[str, str, list], next_index: int,
     data.append(path)
 
 
-def shift_right(depth_nodes: list, layer_from: int):
+def shift_right(depth_nodes: list[list[Node]], layer_from: int):
     for i in range(layer_from, len(depth_nodes)):
-        depth_nodes[i] = [("wire", "", [])] + depth_nodes[i]
+        depth_nodes[i] = [Node("wire", "", [], [])] + depth_nodes[i]
 
 
 def create_wire(location: tuple[int, int, int], path: list[tuple[str, int | tuple[int, int, int]]]):
@@ -233,10 +244,10 @@ def is_facing(location: tuple[int, int, int], direction: str):
     return f"facing={direction}" in schem.getBlockStateAt(location)
 
 
-def main(circuit):
+def main(circuit: circuitgraph.Circuit):
     print(f"is cyclic: {circuit.is_cyclic()}")
 
-    depth_nodes = []
+    depth_nodes: list[list[Node]] = []
     recursive_process(circuit, depth_nodes, circuit.inputs(), 0)
     output_generation(circuit, depth_nodes)
     wire_generation(circuit, depth_nodes)
@@ -247,11 +258,12 @@ def main(circuit):
         up = depth * 5
 
         for index, node in enumerate(nodes):
-            typ, name, data = node
+            typ, name, data, output = node.to_tuple()
 
-            print(f"    {name}: {typ}")
+            print(f"    {name} - {typ}: ")
             for d in data:
-                print(f"        {d}")
+                print(f"        data:{d}")
+            print(f"        output: {output}")
 
             right = index * 5
 
