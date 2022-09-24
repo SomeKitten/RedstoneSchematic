@@ -14,6 +14,7 @@ class LogicSchematics:
     io_output = mcschematic.MCSchematic("./schematics/output.schem")
 
     blank = mcschematic.MCSchematic("./schematics/blank.schem")
+    tunnel = mcschematic.MCSchematic("./schematics/tunnel.schem")
 
     nodes = {
         "and": gate_and,
@@ -25,7 +26,9 @@ class LogicSchematics:
         "xor": gate_xor,
         "input": io_input,
         "output": io_output,
-        "wire": blank
+        "wire": blank,
+        "tunnel": tunnel,
+        "buf": tunnel
     }
 
     wire_stair_up = mcschematic.MCSchematic("./schematics/stair_up.schem").getStructure()

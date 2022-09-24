@@ -5,14 +5,15 @@ import mcschematic
 import circuitgraph as cg
 from logic_schematics import LogicSchematics
 
-input_verilog = "test"
+input_verilog = "test2"
 
 # change this dir to yur own schematic folder
 output_dir = "/home/kitten/.local/share/multimc/instances/1.17.1/.minecraft/config/worldedit/schematics"
 
 schem = mcschematic.MCSchematic()
 
-circuit_from_verilog = cg.from_file(f"./verilog/{input_verilog}.v")
+# circuit_from_verilog = cg.from_file(f"./verilog/{input_verilog}.v")
+circuit_from_verilog = cg.logic.full_adder()
 
 
 class Node:
@@ -26,13 +27,20 @@ class Node:
     def to_tuple(self):
         return self.typ, self.name, self.data, self.output
 
+    def __repr__(self):
+        return f"Node({self.typ}, {self.name}, {self.data}, {self.output})"
+
+
+def nodes_to_names(nodes: list[Node]):
+    return [node.name for node in nodes]
+
 
 def recursive_process(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node]], nodes: [str], depth: int):
     if depth >= len(depth_nodes):
         depth_nodes += [[], []]
 
     for node in nodes:
-        if node not in map(lambda x: x.name, depth_nodes[depth]):
+        if node not in nodes_to_names(depth_nodes[depth]):
             fan = circuit.fanout(node)
             if circuit.is_output(node):
                 depth_nodes[depth] = [Node(circuit.type(node), node, [], fan)] + depth_nodes[depth]
@@ -42,39 +50,72 @@ def recursive_process(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node
                 recursive_process(circuit, depth_nodes, fan, depth + 2)
 
 
+def redundant_node_deletion(depth_nodes: list[list[Node]]):
+    s = set()
+    for index, layer in enumerate(reversed(depth_nodes)):
+        index = len(depth_nodes) - index - 1
+        depth_nodes[index] = [node for node in layer if node.name not in s]
+        s |= set(nodes_to_names(layer))
+
+
+def tunnel_generation(depth_nodes: list[list[Node]]):
+    tunnel_amount = 0
+
+    for depth in range(len(depth_nodes) // 2 - 1):
+        index = depth * 2
+        nodes = depth_nodes[index]
+        next_nodes = depth_nodes[index + 2]
+        next_nodes_names = nodes_to_names(next_nodes)
+
+        for i, node in enumerate(nodes):
+            typ, name, data, output = node.to_tuple()
+
+            tunnel_outputs = []
+            for out in output:
+                if out not in next_nodes_names:
+                    tunnel_outputs.append(out)
+            output -= set(tunnel_outputs)
+
+            if len(tunnel_outputs) > 0:
+                tunnel_name = f"tunnel{tunnel_amount}"
+                next_nodes += [Node("tunnel", tunnel_name, [], set(tunnel_outputs))]
+                output.add(tunnel_name)
+                tunnel_amount += 1
+
+
 def output_generation(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node]]):
-    for depth in range(int(len(depth_nodes) / 2)):
+    for depth in range(len(depth_nodes) // 2):
         index = depth * 2 + 1
 
         before_len = len(depth_nodes[index - 1])
         after_len = len(depth_nodes[index + 1]) if index + 1 < len(depth_nodes) else 0
         depth_nodes[index] = []
         for i in range(max(before_len, after_len)):
-            depth_nodes[index] += [Node("wire", "", [], [])]
+            depth_nodes[index] += [Node("wire", "", [], set())]
 
         for i, node in enumerate(depth_nodes[index - 1]):
             typ, name, data, output = node.to_tuple()
 
-            if typ == "wire":
+            if typ == "wire" or name not in circuit.nodes():
                 continue
             if circuit.is_output(name):
-                depth_nodes[index][i] = Node("output", "", [], [])
+                depth_nodes[index][i] = Node("output", "", [], set())
                 if after_len >= before_len:
-                    depth_nodes[index] += [Node("wire", "", [], [])]
+                    depth_nodes[index] += [Node("wire", "", [], set())]
                 shift_right(depth_nodes, index + 1)
 
 
 # generate redstone wires
 def wire_generation(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node]]):
     node_input_amount = {}
-    for depth in range(int(len(depth_nodes) / 2)):
+    for depth in range(len(depth_nodes) // 2):
         index = depth * 2
         input_amount = 0
 
         if len(depth_nodes) <= index + 2:
             continue
 
-        next_nodes = list(map(lambda x: x.name, depth_nodes[index + 2]))
+        next_nodes = nodes_to_names(depth_nodes[index + 2])
         for i, node in enumerate(depth_nodes[index]):
             typ, name, data, output = node.to_tuple()
             wire_node = depth_nodes[index + 1][i]
@@ -118,7 +159,7 @@ def single_wire_generation(node: Node, next_index: int,
 
 def shift_right(depth_nodes: list[list[Node]], layer_from: int):
     for i in range(layer_from, len(depth_nodes)):
-        depth_nodes[i] = [Node("wire", "", [], [])] + depth_nodes[i]
+        depth_nodes[i] = [Node("wire", "", [], set())] + depth_nodes[i]
 
 
 def create_wire(location: tuple[int, int, int], path: list[tuple[str, int | tuple[int, int, int]]]):
@@ -130,7 +171,9 @@ def create_wire(location: tuple[int, int, int], path: list[tuple[str, int | tupl
             z += length[2]
             continue
 
-        place_redstone((x, y, z))
+        distance = 0
+        first_placed = place_redstone((x, y, z))
+
         if length == 0:
             continue
         # reverse direction if negative
@@ -142,8 +185,6 @@ def create_wire(location: tuple[int, int, int], path: list[tuple[str, int | tupl
             }[direction]
             length = -length
 
-        distance = 0
-        first_placed = False
 
         if direction == "up":
             # generate glass ladder
@@ -187,25 +228,25 @@ def create_wire(location: tuple[int, int, int], path: list[tuple[str, int | tupl
                 x += 1
                 distance += 1
 
-                first_placed = place_redstone((x, y, z), "west", first_placed and 0 < distance < length)
+                first_placed |= place_redstone((x, y, z), "west", first_placed and 0 < distance < length)
         elif direction == "backward":
             for _ in range(length):
                 x -= 1
                 distance += 1
 
-                first_placed = place_redstone((x, y, z), "east", first_placed and 0 < distance < length)
+                first_placed |= place_redstone((x, y, z), "east", first_placed and 0 < distance < length)
         elif direction == "left":
             for _ in range(length):
                 z -= 1
                 distance += 1
 
-                first_placed = place_redstone((x, y, z), "south", first_placed and 0 < distance < length)
+                first_placed |= place_redstone((x, y, z), "south", first_placed and 0 < distance < length)
         elif direction == "right":
             for _ in range(length):
                 z += 1
                 distance += 1
 
-                first_placed = place_redstone((x, y, z), "north", first_placed and 0 < distance < length)
+                first_placed |= place_redstone((x, y, z), "north", first_placed and 0 < distance < length)
         else:
             raise ValueError(f"Unknown direction: {direction}")
         place_redstone((x, y, z))
@@ -249,6 +290,8 @@ def main(circuit: circuitgraph.Circuit):
 
     depth_nodes: list[list[Node]] = []
     recursive_process(circuit, depth_nodes, circuit.inputs(), 0)
+    redundant_node_deletion(depth_nodes)
+    tunnel_generation(depth_nodes)
     output_generation(circuit, depth_nodes)
     wire_generation(circuit, depth_nodes)
 
