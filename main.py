@@ -97,6 +97,8 @@ def wide_gate_splitter(circuit: circuitgraph.Circuit, depth_nodes: list[list[Nod
                         else:
                             break
 
+                    shift_right(depth_nodes, index + 1)
+
                     depth_nodes.insert(out_index + 1, new_layer)
                     depth_nodes.insert(out_index + 1, [])
             print(f"output: {output}")
