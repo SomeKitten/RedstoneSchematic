@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import time
 
 import circuitgraph
@@ -7,25 +8,44 @@ import mcschematic
 import circuitgraph as cg
 from logic_schematics import LogicSchematics
 
-# change this dir to yur own schematic folder
+time_str = time.strftime("%Y-%m-%d--%H:%M:%S")
+
+# change this dir to your own schematic folder
 output_dir = "/home/kitten/.local/share/multimc/instances/1.17.1/.minecraft/config/worldedit/schematics"
+dump_file_path = f"./generated/{time_str}_dump"
 
 schem = mcschematic.MCSchematic()
 
 circuit_type = "mux"
 
 if circuit_type == "mux":
-    circuit_from_verilog = cg.logic.mux(4)
-    circuit_from_verilog = cg.tx.syn(circuit_from_verilog, suppress_output=True)
+    circuit_from_verilog = cg.logic.mux(3)
 elif circuit_type == "full_adder":
     circuit_from_verilog = cg.logic.full_adder()
-    circuit_from_verilog = cg.tx.syn(circuit_from_verilog, suppress_output=True)
 else:
-    circuit_from_verilog = cg.tx.syn(cg.Circuit(), verilog_exists=True, pre_syn_file=f"./verilog/{circuit_type}.v",
-                                     post_syn_file=f"./verilog/{circuit_type}_syn.v", suppress_output=True)
+    circuit_from_verilog = cg.Circuit()
+# else:
+# circuit_from_verilog = cg.tx.syn(cg.Circuit(), verilog_exists=True, pre_syn_file=f"./verilog/{circuit_type}.v",
+#                                  post_syn_file=f"./verilog/{circuit_type}_syn.v", suppress_output=True)
 
-cg.visualize(circuit_from_verilog, f"generated/{circuit_type}_{time.time_ns()}.png")
-cg.to_file(circuit_from_verilog, f"generated/{circuit_type}_{time.time_ns()}.v")
+cg.to_file(circuit_from_verilog, f"{dump_file_path}.v")
+syn_command = [
+    "yosys",
+    "-p",
+    f"read_verilog {dump_file_path}.v; "
+    "splitnets -ports; "
+    f"write_verilog -noattr {dump_file_path}_syn.v; "
+]
+
+yosys_subprocess_result = subprocess.run(syn_command, capture_output=True, text=True)
+# uncomment lines below for yosys output
+# print(yosys_subprocess_result.stdout)
+# print(yosys_subprocess_result.stderr)
+
+circuit_from_verilog = cg.from_file(f"{dump_file_path}_syn.v")
+
+cg.visualize(circuit_from_verilog, f"generated/{time_str}_{circuit_type}.png")
+cg.to_file(circuit_from_verilog, f"generated/{time_str}_{circuit_type}.v")
 
 
 class Node:
@@ -82,7 +102,7 @@ def wide_gate_splitter(depth_nodes: list[list[Node]]):
         current_layer = depth_nodes[index]
         for i, node in enumerate(current_layer):
             typ, name, data, output = node.to_tuple()
-            if typ == "buf" or typ == "tunnel":
+            if typ == "buf":
                 continue
 
             for out in output.copy():
@@ -122,6 +142,13 @@ def get_node(depth_nodes: list[list[Node]], name: str):
     raise KeyError(f"Node {name} not found")
 
 
+def get_node_from_layer(layer: list[Node], name: str):
+    for node in layer:
+        if node.name == name:
+            return node
+    raise KeyError(f"Node {name} not found")
+
+
 def tunnel_generation(depth_nodes: list[list[Node]]):
     tunnel_amount = 0
 
@@ -142,9 +169,20 @@ def tunnel_generation(depth_nodes: list[list[Node]]):
 
             if len(tunnel_outputs) > 0:
                 tunnel_name = f"tunnel{tunnel_amount}"
-                next_nodes += [Node("tunnel", tunnel_name, [], set(tunnel_outputs))]
+                next_nodes += [Node("buf", tunnel_name, [], set(tunnel_outputs))]
                 output.add(tunnel_name)
                 tunnel_amount += 1
+
+
+def inbetween_generation(depth_nodes: list[list[Node]]):
+    for depth in range(len(depth_nodes) // 2):
+        index = depth * 2 + 1
+
+        before_len = len(depth_nodes[index - 1])
+        after_len = len(depth_nodes[index + 1]) if index + 1 < len(depth_nodes) else 0
+        depth_nodes[index] = []
+        for _ in range(max(before_len, after_len)):
+            depth_nodes[index] += [Node("wire", "", [], set())]
 
 
 def output_generation(depth_nodes: list[list[Node]]):
@@ -153,20 +191,84 @@ def output_generation(depth_nodes: list[list[Node]]):
 
         before_len = len(depth_nodes[index - 1])
         after_len = len(depth_nodes[index + 1]) if index + 1 < len(depth_nodes) else 0
-        depth_nodes[index] = []
-        for i in range(max(before_len, after_len)):
-            depth_nodes[index] += [Node("wire", "", [], set())]
 
         for i, node in enumerate(depth_nodes[index - 1]):
             typ, name, data, output = node.to_tuple()
 
-            if typ == "wire" or len(output) > 0:
+            if typ == "wire" or typ == "blank" or len(output) > 0:
                 continue
 
             depth_nodes[index][i] = Node("output", f"Output: {name}", [], set())
             if after_len >= before_len:
                 depth_nodes[index] += [Node("wire", "", [], set())]
             shift_right(depth_nodes, index + 1)
+
+
+def get_input_amount(depth_nodes: list[list[Node]]):
+    node_input_amount = {}
+    for depth in range(len(depth_nodes) // 2):
+        index = depth * 2
+
+        for i, node in enumerate(depth_nodes[index]):
+            typ, name, data, output = node.to_tuple()
+
+            for next_node in output:
+                if next_node not in node_input_amount:
+                    node_input_amount[next_node] = 0
+                if node_input_amount[next_node] >= 2:
+                    raise IndexError("Too many inputs")
+                node_input_amount[next_node] += 1
+
+    return node_input_amount
+
+
+def reorganize_paths(depth_nodes: list[list[Node]], node_input_amount: dict[str, int]):
+    for depth in range(len(depth_nodes) // 2 - 1):
+        index = depth * 2
+
+        for i, node in enumerate(depth_nodes[index]):
+            typ, name, data, output = node.to_tuple()
+
+            if len(output) != 1:
+                continue
+
+            only_output = list(output)[0]
+
+            if only_output not in node_input_amount:
+                print(f"Warning: Node {only_output} should have input, but has none!")
+                continue
+
+            if node_input_amount[only_output] > 1:
+                continue
+
+            next_index = index + 2
+            next_node = get_node_from_layer(depth_nodes[next_index], only_output)
+
+            if len(next_node.output) == 0:
+                continue
+
+            depth_nodes[next_index].remove(next_node)
+            depth_nodes[next_index].insert(i, next_node)
+
+            depth_nodes[index + 1][i] = Node("path", "", [], set())
+
+
+def clear_path_rows(depth_nodes: list[list[Node]]):
+    remove_rows = []
+    for depth in range(len(depth_nodes) // 2 - 1):
+        index = depth * 2 + 1
+
+        if all((node.typ == "path" or node.typ == "blank") for node in depth_nodes[index]):
+            remove_rows.insert(0, index)
+
+    for index in remove_rows:
+        print(f"Removing row {[node.typ for node in depth_nodes[index]]}")
+        depth_nodes.pop(index)
+        print(f"Removing row {[node.typ for node in depth_nodes[index]]}")
+        removed_row = depth_nodes.pop(index)
+
+        for node_index, node in enumerate(depth_nodes[index - 1]):
+            node.output = removed_row[node_index].output
 
 
 # generate redstone wires
@@ -183,6 +285,9 @@ def wire_generation(depth_nodes: list[list[Node]]):
         for i, node in enumerate(depth_nodes[index]):
             typ, name, data, output = node.to_tuple()
             wire_node = depth_nodes[index + 1][i]
+
+            if wire_node.typ != "wire":
+                continue
 
             for next_node in output:
                 if next_node not in node_input_amount:
@@ -204,9 +309,11 @@ def single_wire_generation(node: Node, next_index: int,
 
     path = []
 
+    height = input_amount * 2 + 2
+
     path.append(("right", 2))
 
-    path.append(("up", input_amount * 2))
+    path.append(("up", height))
     path.append(("forward", 2))
 
     right_amount = -4 + (next_index - index) * 5
@@ -216,14 +323,14 @@ def single_wire_generation(node: Node, next_index: int,
 
     path.append(("forward", 2))
 
-    path.append(("down_" + ("a" if output_slot == "left" else "b"), input_amount * 2))
+    path.append(("down_" + ("a" if output_slot == "left" else "b"), height))
 
     data.append(path)
 
 
 def shift_right(depth_nodes: list[list[Node]], layer_from: int):
     for i in range(layer_from, len(depth_nodes)):
-        depth_nodes[i] = [Node("wire", "", [], set())] + depth_nodes[i]
+        depth_nodes[i] = [Node("blank", "", [], set())] + depth_nodes[i]
 
 
 def create_wire(location: tuple[int, int, int], path: list[tuple[str, int | tuple[int, int, int]]]):
@@ -356,7 +463,13 @@ def main(circuit: circuitgraph.Circuit):
     redundant_node_deletion(depth_nodes)
     wide_gate_splitter(depth_nodes)
     tunnel_generation(depth_nodes)
+    inbetween_generation(depth_nodes)
     output_generation(depth_nodes)
+
+    node_input_amount = get_input_amount(depth_nodes)
+    reorganize_paths(depth_nodes, node_input_amount)
+
+    clear_path_rows(depth_nodes)
     wire_generation(depth_nodes)
 
     for depth, nodes in enumerate(depth_nodes):
@@ -379,10 +492,11 @@ def main(circuit: circuitgraph.Circuit):
                 if len(data) > 0:
                     for path in data:
                         create_wire((up, 1, right + 2), path)
-                if typ != "wire":
-                    sign_nbt = "minecraft:birch_sign[rotation=4]{Text1:'{\"text\":\"" +\
-                                   name.replace("\\", "\\\\\\\\") + "\"}'}"
-                    schem.setBlock((up, 3, right + 2), sign_nbt)
+
+                sign_nbt = "minecraft:birch_sign[rotation=4]{Text1:'{\"text\":\"" + \
+                           typ.replace("\\", "\\\\\\\\") + "\"}',Text2:'{\"text\":\"" + \
+                           name.replace("\\", "\\\\\\\\") + "\"}'}"
+                schem.setBlock((up, 3, right + 2), sign_nbt)
 
     schem.save(output_dir, "logic", mcschematic.Version.JE_1_17_1)
 
