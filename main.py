@@ -1,23 +1,31 @@
 from __future__ import annotations
 
+import time
+
 import circuitgraph
 import mcschematic
 import circuitgraph as cg
 from logic_schematics import LogicSchematics
-
-input_verilog = "alu"
 
 # change this dir to yur own schematic folder
 output_dir = "/home/kitten/.local/share/multimc/instances/1.17.1/.minecraft/config/worldedit/schematics"
 
 schem = mcschematic.MCSchematic()
 
-# circuit_from_verilog = cg.from_file(f"./verilog/{input_verilog}.v")
-# circuit_from_verilog = cg.logic.mux(3)
-# circuit_from_verilog = cg.logic.full_adder()
-circuit_from_verilog = cg.logic.adder(4)
+circuit_type = "mux"
 
-cg.to_file(circuit_from_verilog, "verilog/generated.v")
+if circuit_type == "mux":
+    circuit_from_verilog = cg.logic.mux(4)
+    circuit_from_verilog = cg.tx.syn(circuit_from_verilog, suppress_output=True)
+elif circuit_type == "full_adder":
+    circuit_from_verilog = cg.logic.full_adder()
+    circuit_from_verilog = cg.tx.syn(circuit_from_verilog, suppress_output=True)
+else:
+    circuit_from_verilog = cg.tx.syn(cg.Circuit(), verilog_exists=True, pre_syn_file=f"./verilog/{circuit_type}.v",
+                                     post_syn_file=f"./verilog/{circuit_type}_syn.v", suppress_output=True)
+
+cg.visualize(circuit_from_verilog, f"generated/{circuit_type}_{time.time_ns()}.png")
+cg.to_file(circuit_from_verilog, f"generated/{circuit_type}_{time.time_ns()}.v")
 
 
 class Node:
@@ -47,11 +55,16 @@ def recursive_process(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node
         if node not in nodes_to_names(depth_nodes[depth]):
             fan = circuit.fanout(node)
             if circuit.is_output(node):
+                if len(fan) > 0:
+                    print(f"Warning: output {node} has fanout {fan}")
                 depth_nodes[depth] = [Node(circuit.type(node), node, [], set())] + depth_nodes[depth]
-            else:
+            elif len(fan) > 0:
                 depth_nodes[depth] += [Node(circuit.type(node), node, [], fan)]
-            if len(fan) > 0:
                 recursive_process(circuit, depth_nodes, fan, depth + 2)
+            else:
+                print(f"Warning: {node} - {circuit.type(node)} has no fanout")
+                circuit.set_output(node)
+                depth_nodes[depth] = [Node(circuit.type(node), node, [], set())] + depth_nodes[depth]
 
 
 def redundant_node_deletion(depth_nodes: list[list[Node]]):
@@ -62,7 +75,7 @@ def redundant_node_deletion(depth_nodes: list[list[Node]]):
         s |= set(nodes_to_names(layer))
 
 
-def wide_gate_splitter(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node]]):
+def wide_gate_splitter(depth_nodes: list[list[Node]]):
     node_input_amount = {}
     index = 0
     while index < len(depth_nodes):
@@ -71,9 +84,6 @@ def wide_gate_splitter(circuit: circuitgraph.Circuit, depth_nodes: list[list[Nod
             typ, name, data, output = node.to_tuple()
             if typ == "buf" or typ == "tunnel":
                 continue
-
-            print(f"Processing {typ} {name} at {index} {i}")
-            print(f"output: {output}")
 
             for out in output.copy():
                 if out not in node_input_amount:
@@ -97,11 +107,10 @@ def wide_gate_splitter(circuit: circuitgraph.Circuit, depth_nodes: list[list[Nod
                         else:
                             break
 
-                    shift_right(depth_nodes, index + 1)
+                    shift_right(depth_nodes, index + 2)
 
                     depth_nodes.insert(out_index + 1, new_layer)
                     depth_nodes.insert(out_index + 1, [])
-            print(f"output: {output}")
         index += 2
 
 
@@ -154,14 +163,14 @@ def output_generation(depth_nodes: list[list[Node]]):
             if typ == "wire" or len(output) > 0:
                 continue
 
-            depth_nodes[index][i] = Node("output", "", [], set())
+            depth_nodes[index][i] = Node("output", f"Output: {name}", [], set())
             if after_len >= before_len:
                 depth_nodes[index] += [Node("wire", "", [], set())]
             shift_right(depth_nodes, index + 1)
 
 
 # generate redstone wires
-def wire_generation(circuit: circuitgraph.Circuit, depth_nodes: list[list[Node]]):
+def wire_generation(depth_nodes: list[list[Node]]):
     node_input_amount = {}
     for depth in range(len(depth_nodes) // 2):
         index = depth * 2
@@ -345,10 +354,10 @@ def main(circuit: circuitgraph.Circuit):
     depth_nodes: list[list[Node]] = []
     recursive_process(circuit, depth_nodes, circuit.inputs(), 0)
     redundant_node_deletion(depth_nodes)
-    wide_gate_splitter(circuit, depth_nodes)
+    wide_gate_splitter(depth_nodes)
     tunnel_generation(depth_nodes)
     output_generation(depth_nodes)
-    wire_generation(circuit, depth_nodes)
+    wire_generation(depth_nodes)
 
     for depth, nodes in enumerate(depth_nodes):
         print(f"Depth {depth}: {len(nodes)}")
@@ -370,6 +379,10 @@ def main(circuit: circuitgraph.Circuit):
                 if len(data) > 0:
                     for path in data:
                         create_wire((up, 1, right + 2), path)
+                if typ != "wire":
+                    sign_nbt = "minecraft:birch_sign[rotation=4]{Text1:'{\"text\":\"" +\
+                                   name.replace("\\", "\\\\\\\\") + "\"}'}"
+                    schem.setBlock((up, 3, right + 2), sign_nbt)
 
     schem.save(output_dir, "logic", mcschematic.Version.JE_1_17_1)
 
